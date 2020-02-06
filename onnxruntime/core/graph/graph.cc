@@ -1796,28 +1796,46 @@ Status Graph::VerifyNodeAndOpMatch() {
 
     if (!node.Op()) {
       try {
-        checker::check_node(node_proto, ctx, lsc);
+        auto maxInclusiveVersion = DomainToVersionMap().find(domain)->second;
+        node.op_ = schema_registry_->GetSchema(node.OpType(), maxInclusiveVersion, node.Domain());
+        // checker::check_node(node_proto, ctx, lsc);
+        if (node_proto.input().empty() && node_proto.output().empty()) {
+          fail_check("NodeProto (name: ", node_proto.name(), ", type: ", node_proto.op_type(),
+                     ") has zero input and zero output.");
+        }
+
+        for (const auto& attr : node_proto.attribute()) {
+          check_attribute(attr, ctx, lsc);
+        }
+
+        const auto* schema =
+            ctx.get_schema_registry()->GetSchema(node_proto.op_type(), maxInclusiveVersion, node_proto.domain());
+        if (!schema) {
+          fail_check("No Op registered for " + node_proto.op_type() + " with domain_version of " +
+                     ONNX_NAMESPACE::to_string(maxInclusiveVersion));
+        } else if (schema->Deprecated()) {
+          fail_check("Op registered for " + node_proto.op_type() + " is deprecated in domain_version of " +
+                     ONNX_NAMESPACE::to_string(maxInclusiveVersion));
+        } else {
+          schema->Verify(node_proto);
+        }
+        if (node.op_ && node.op_->Deprecated()) {
+          return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Fatal error: ", node.OpType(), " is deprecated in opset ",
+                                 maxInclusiveVersion);
+        }
       } catch (const std::exception& ex) {
         return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_GRAPH, "This is an invalid model. Error in Node:", node_name, " : ", ex.what());
       }
 
-      auto maxInclusiveVersion = DomainToVersionMap().find(domain)->second;
-      node.op_ = schema_registry_->GetSchema(node.OpType(), maxInclusiveVersion, node.Domain());
-
-      if (node.op_ && node.op_->Deprecated()) {
-        node.op_ = nullptr;
-      }
-
       if (node.op_ && node.op_->HasFunction()) {
         auto onnx_function_proto = node.op_->GetFunction();
-        auto func_ptr = onnxruntime::make_unique<onnxruntime::FunctionImpl>(*this, node.Index(), *onnx_function_proto,
-            logger_);
-        function_container_.emplace_back(std::move(func_ptr));
+        function_container_.emplace_back(
+            onnxruntime::make_unique<onnxruntime::FunctionImpl>(*this, node.Index(), *onnx_function_proto, logger_));
         node.SetFunctionBody(*function_container_.back());
       }
 
       if (!node.op_) {
-        return Status(ONNXRUNTIME, FAIL, "Fatal error: " + node.OpType() + " is not a registered function/op");
+        return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Fatal error: ", node.OpType(), " is not a registered function/op");
       }
     }
 
